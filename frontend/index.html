@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Medical LLM Evaluator</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <nav class="navbar navbar-dark bg-dark">
+    <div class="container-fluid">
+      <span class="navbar-brand fw-bold">Medical LLM Evaluator</span>
+      <span class="navbar-text text-muted small">Malnutrition/Undernutrition Interventions</span>
+    </div>
+  </nav>
+
+  <!-- Global system overview banner -->
+  <div class="system-overview-bar">
+    <div class="container-fluid">
+      <div class="sysbar-inner">
+        <div class="sysbar-title">How this system works</div>
+        <div class="sysbar-steps">
+          <div class="sysbar-step">
+            <span class="sysbar-num">1</span>
+            <div>
+              <strong>Download</strong><br>
+              <small>Fetch scientific papers from Europe PMC on your chosen topic. PDFs and metadata are stored locally.</small>
+            </div>
+          </div>
+          <div class="sysbar-arrow">→</div>
+          <div class="sysbar-step">
+            <span class="sysbar-num">2</span>
+            <div>
+              <strong>Process</strong><br>
+              <small>Extract text from PDFs, split into overlapping chunks (~512 tokens). Required before any LLM task.</small>
+            </div>
+          </div>
+          <div class="sysbar-arrow">→</div>
+          <div class="sysbar-step">
+            <span class="sysbar-num">3</span>
+            <div>
+              <strong>Run Tasks</strong><br>
+              <small>Claude summarises, extracts structured data, or answers questions. OpenAI independently checks every output.</small>
+            </div>
+          </div>
+          <div class="sysbar-arrow">→</div>
+          <div class="sysbar-step">
+            <span class="sysbar-num">4</span>
+            <div>
+              <strong>Evaluate</strong><br>
+              <small>8 automated test categories (hallucination, grounding, numeric accuracy, …) run on a stratified 10 % subset.</small>
+            </div>
+          </div>
+          <div class="sysbar-arrow">→</div>
+          <div class="sysbar-step">
+            <span class="sysbar-num">5</span>
+            <div>
+              <strong>Inspect Metrics</strong><br>
+              <small>Pass rates, weighted risk score, and per-category breakdown reveal where the LLM fails.</small>
+            </div>
+          </div>
+        </div>
+        <div class="sysbar-links">
+          <div class="sysbar-links-title">Links</div>
+          <a href="/docs" target="_blank" class="sysbar-link">📄 API Docs (Swagger UI)</a>
+        </div>
+        <button class="sysbar-close" onclick="this.closest('.system-overview-bar').style.display='none'" title="Dismiss">✕</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="container-fluid mt-3">
+    <ul class="nav nav-tabs mb-4" id="mainTabs">
+      <li class="nav-item">
+        <a class="nav-link active" href="#" data-tab="documents">Documents</a>
+      </li>
+      <li class="nav-item">
+        <a class="nav-link" href="#" data-tab="tasks">Tasks</a>
+      </li>
+      <li class="nav-item">
+        <a class="nav-link" href="#" data-tab="evaluations">Evaluations</a>
+      </li>
+      <li class="nav-item">
+        <a class="nav-link" href="#" data-tab="metrics">Metrics</a>
+      </li>
+      <li class="nav-item">
+        <a class="nav-link" href="#" data-tab="history">History</a>
+      </li>
+      <li class="nav-item ms-auto">
+        <a class="nav-link" href="#" data-tab="help">📖 Guide</a>
+      </li>
+    </ul>
+
+    <div id="tab-documents" class="tab-pane active"></div>
+    <div id="tab-tasks" class="tab-pane d-none"></div>
+    <div id="tab-evaluations" class="tab-pane d-none"></div>
+    <div id="tab-metrics" class="tab-pane d-none"></div>
+    <div id="tab-history" class="tab-pane d-none"></div>
+    <div id="tab-help" class="tab-pane d-none"></div>
+  </div>
+
+  <!-- Document detail modal -->
+  <div class="modal fade" id="docModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title" id="docModalTitle">Document Detail</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body" id="docModalBody"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast-container" class="position-fixed bottom-0 end-0 p-3" style="z-index:1100"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="app.js?v=4"></script>
+  <script src="components/documents.js?v=4"></script>
+  <script src="components/tasks.js?v=4"></script>
+  <script src="components/evaluations.js?v=4"></script>
+  <script src="components/metrics.js?v=4"></script>
+  <script src="components/history.js?v=4"></script>
+  <script src="components/help.js?v=4"></script>
+  <script>
+    document.addEventListener('DOMContentLoaded', () => App.init());
+  </script>
+</body>
+</html>

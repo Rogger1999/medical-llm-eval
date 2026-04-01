@@ -1,0 +1,113 @@
+server:
+  host: "0.0.0.0"
+  port: 8000
+  reload: true
+  workers: 1
+  log_level: "info"
+
+paths:
+  data_dir: "./data"
+  pdfs_dir: "./data/pdfs"
+  parsed_dir: "./data/parsed"
+  chunks_dir: "./data/chunks"
+  logs_dir: "./data/logs"
+
+database:
+  url: "sqlite+aiosqlite:///./data/rag.db"
+  echo: false
+  pool_pre_ping: true
+
+logging:
+  level: "INFO"
+  format: "json"
+  file: "./data/logs/app.log"
+  rotation: "10 MB"
+
+document_sources:
+  default: "europe_pmc"
+  europe_pmc:
+    base_url: "https://www.ebi.ac.uk/europepmc/webservices/rest"
+    results_per_page: 25
+    format: "json"
+    timeout_seconds: 30
+
+downloader:
+  max_concurrent: 3
+  retry_attempts: 3
+  retry_delay_seconds: 2
+  pdf_timeout_seconds: 60
+  user_agent: "MedRAGEval/1.0 (research prototype)"
+
+topic_defaults:
+  query: "malnutrition undernutrition children interventions treatment"
+  max_results: 50
+  year_from: 2010
+  filters:
+    - "HAS_ABSTRACT:Y"
+    - "OPEN_ACCESS:Y"
+    - "PUB_TYPE:research-article"
+
+parsing:
+  min_text_length: 100
+  max_pages: 50
+  fallback_to_abstract: true
+  clean_whitespace: true
+  remove_references_section: false
+
+chunking:
+  chunk_size: 512
+  overlap: 64
+  min_chunk_size: 50
+  preserve_sentences: true
+  save_to_file: true
+
+retrieval:
+  top_k: 5
+  min_score: 0.01
+  algorithm: "bm25_keyword"
+  boost_title_matches: true
+
+evaluation:
+  subset_fraction: 0.10
+  min_subset_size: 5
+  max_subset_size: 50
+  categories:
+    - "ingest"
+    - "retrieval"
+    - "grounding"
+    - "hallucination"
+    - "numeric"
+    - "abstention"
+    - "adversarial"
+    - "overclaiming"
+  weights:
+    ingest: 1.0
+    retrieval: 1.5
+    grounding: 2.0
+    hallucination: 2.0
+    numeric: 1.5
+    abstention: 1.0
+    adversarial: 1.5
+    overclaiming: 2.0
+  pass_threshold: 0.6
+
+models:
+  claude:
+    api_key: "${ANTHROPIC_API_KEY}"
+    model: "claude-opus-4-5"
+    max_tokens: 2048
+    temperature: 0.1
+    system_role: "medical_assistant"
+  openai:
+    api_key: "${OPENAI_API_KEY}"
+    model: "gpt-4o-mini"
+    max_tokens: 1024
+    temperature: 0.1
+    checker_role: "medical_evaluator"
+
+frontend:
+  static_dir: "./frontend"
+  title: "Medical RAG Evaluator"
+  description: "LLM evaluation prototype for malnutrition/undernutrition interventions"
+  api_base_url: "http://localhost:8000"
+  items_per_page: 20

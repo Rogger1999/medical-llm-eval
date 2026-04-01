@@ -1,0 +1,31 @@
+# Secrets — never commit
+key.yaml
+.env
+.env.local
+.env.*.local
+
+# Data — generated at runtime
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
