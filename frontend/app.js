@@ -1,6 +1,7 @@
 /* Main application: tab routing, shared fetch helpers, global state */
 const App = (() => {
-  const API_BASE = 'http://localhost:8000';
+  // Use current origin so it works both locally and on Railway/any deployment
+  const API_BASE = window.location.origin;
   const state = { currentTab: 'documents', documents: [], selectedDocId: null };
 
   function init() {

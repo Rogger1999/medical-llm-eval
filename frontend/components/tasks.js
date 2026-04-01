@@ -33,8 +33,11 @@ const TasksComponent = (() => {
               <input id="task-question" class="form-control form-control-sm"
                 placeholder="What intervention was used?" />
             </div>
-            <button id="btn-run-task" class="btn btn-primary btn-sm w-100">Run Task</button>
-            <button id="btn-summarize-all" class="btn btn-outline-primary btn-sm w-100 mt-2">Summarize All Docs</button>
+            <div id="no-docs-warning" class="alert alert-warning py-1 px-2 small mb-2 d-none">
+              ⚠️ No documents yet — go to <strong>Documents</strong> tab and download some first.
+            </div>
+            <button id="btn-run-task" class="btn btn-primary btn-sm w-100" disabled>Run Task</button>
+            <button id="btn-summarize-all" class="btn btn-outline-primary btn-sm w-100 mt-2" disabled>Summarize All Docs</button>
             <small class="text-muted d-block mt-1">Calls Claude API + OpenAI API — may take 10–30 s per doc.</small>
           </div>
           <div class="form-section mt-2">
@@ -94,11 +97,29 @@ const TasksComponent = (() => {
       opt.title = doc.title || doc.id;
       return opt;
     }
+    function setDocsReady(count) {
+      const warn = document.getElementById('no-docs-warning');
+      const btnRun = document.getElementById('btn-run-task');
+      const btnAll = document.getElementById('btn-summarize-all');
+      if (count === 0) {
+        warn?.classList.remove('d-none');
+        if (btnRun) btnRun.disabled = true;
+        if (btnAll) btnAll.disabled = true;
+      } else {
+        warn?.classList.add('d-none');
+        if (btnRun) btnRun.disabled = false;
+        if (btnAll) btnAll.disabled = false;
+      }
+    }
+
     App.state.documents.forEach(doc => sel.appendChild(makeDocOption(doc)));
     if (!App.state.documents.length) {
       App.apiFetch('/documents?page_size=100').then(data => {
         data.items.forEach(doc => sel.appendChild(makeDocOption(doc)));
+        setDocsReady(data.items.length);
       }).catch(() => {});
+    } else {
+      setDocsReady(App.state.documents.length);
     }
   }
 
