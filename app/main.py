@@ -4,7 +4,10 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+import os
+import time
+
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -30,7 +33,12 @@ async def lifespan(app: FastAPI):
         Path(dir_path).mkdir(parents=True, exist_ok=True)
 
     await init_db()
-    logger.info("event=startup service=medical-rag-eval")
+    logger.info(
+        f"event=startup service=medical-llm-eval "
+        f"port={os.environ.get('PORT', 8000)} "
+        f"anthropic_key_set={bool(os.environ.get('ANTHROPIC_API_KEY'))} "
+        f"openai_key_set={bool(os.environ.get('OPENAI_API_KEY'))}"
+    )
 
     yield
 
@@ -55,6 +63,18 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.middleware("http")
+    async def log_requests(request: Request, call_next):
+        start = time.time()
+        response = await call_next(request)
+        ms = round((time.time() - start) * 1000)
+        logger.info(
+            f"event=request method={request.method} "
+            f"path={request.url.path} "
+            f"status={response.status_code} ms={ms}"
+        )
+        return response
 
     # API routers
     app.include_router(system.router)
