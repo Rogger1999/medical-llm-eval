@@ -27,6 +27,7 @@ async def _run_evaluation(run_id: str, request: EvaluationRunRequest) -> None:
         except Exception as exc:
             logger.error(f"event=eval_run_error run_id={run_id} err={exc!r}", exc_info=True)
             try:
+                await session.rollback()  # must reset before any further use of this session
                 result = await session.execute(
                     select(EvaluationRun).where(EvaluationRun.id == run_id)
                 )
