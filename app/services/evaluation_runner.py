@@ -60,11 +60,13 @@ class EvaluationRunner:
 
         all_evals: list[Evaluation] = []
         for doc in subset:
+            doc_id = doc.id  # capture before any potential rollback expires the object
             try:
                 evals = await self._evaluate_document(doc, run_id, request.categories)
                 all_evals.extend(evals)
             except Exception as exc:
-                logger.error(f"event=eval_doc_error doc_id={doc.id} err={exc!r}")
+                await self.session.rollback()
+                logger.error(f"event=eval_doc_error doc_id={doc_id} err={exc!r}")
 
         aggregator = EvalAggregator()
         summary = aggregator.compute_summary(all_evals)

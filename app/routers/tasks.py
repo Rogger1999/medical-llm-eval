@@ -40,26 +40,31 @@ async def _summarize_all_bg() -> None:
     from app.models.document import Document, DocumentStatus
     from app.models.task import TaskType
     factory = _get_session_factory()
+
+    # Use a short-lived session only to fetch the list of doc IDs, then release
+    # the connection before starting the long-running LLM work.
     async with factory() as session:
         done_result = await session.execute(
             select(Task.document_id).where(Task.task_type == TaskType.summarize).distinct()
         )
         already_done = set(done_result.scalars().all())
-
         all_result = await session.execute(
-            select(Document).where(Document.status == DocumentStatus.chunked)
+            select(Document.id).where(Document.status == DocumentStatus.chunked)
         )
-        docs = [d for d in all_result.scalars().all() if d.id not in already_done]
-        logger.info(f"event=summarize_all_start count={len(docs)}")
-        for doc in docs:
+        doc_ids = [d for d in all_result.scalars().all() if d not in already_done]
+
+    logger.info(f"event=summarize_all_start count={len(doc_ids)}")
+    for doc_id in doc_ids:
+        # Fresh session per document so the connection is not held across LLM calls.
+        async with factory() as session:
             try:
                 runner = TaskRunner(session)
-                await runner.run_summarize(doc.id)
+                await runner.run_summarize(doc_id)
                 await session.commit()
-                logger.info(f"event=summarize_all_done doc_id={doc.id}")
+                logger.info(f"event=summarize_all_done doc_id={doc_id}")
             except Exception as exc:
                 await session.rollback()
-                logger.error(f"event=summarize_all_error doc_id={doc.id} err={exc!r}")
+                logger.error(f"event=summarize_all_error doc_id={doc_id} err={exc!r}")
 
 
 @router.post("/summarize-all", status_code=202)
