@@ -15,7 +15,9 @@ logger = get_logger(__name__)
 
 
 async def _run_evaluation(run_id: str, request: EvaluationRunRequest) -> None:
+    import json
     from app.database import _get_session_factory
+    from app.models.evaluation import EvaluationRun, EvalRunStatus
     from app.services.evaluation_runner import EvaluationRunner
     factory = _get_session_factory()
     async with factory() as session:
@@ -23,7 +25,18 @@ async def _run_evaluation(run_id: str, request: EvaluationRunRequest) -> None:
         try:
             await runner.run(run_id, request)
         except Exception as exc:
-            logger.error(f"event=eval_run_error run_id={run_id} err={exc!r}")
+            logger.error(f"event=eval_run_error run_id={run_id} err={exc!r}", exc_info=True)
+            try:
+                result = await session.execute(
+                    select(EvaluationRun).where(EvaluationRun.id == run_id)
+                )
+                run = result.scalar_one_or_none()
+                if run:
+                    run.status = EvalRunStatus.failed
+                    run.summary_json = json.dumps({"error": type(exc).__name__, "detail": str(exc)})
+                    await session.commit()
+            except Exception as inner:
+                logger.error(f"event=eval_run_status_update_failed run_id={run_id} err={inner!r}")
 
 
 @router.post("/run", response_model=EvaluationRunRead, status_code=202)
@@ -34,13 +47,32 @@ async def run_evaluation(
 ) -> EvaluationRunRead:
     """Trigger a full evaluation run on a document subset."""
     from app.models.evaluation import EvalRunStatus
-    run = EvaluationRun(status=EvalRunStatus.running)
-    db.add(run)
-    await db.flush()
-    await db.refresh(run)
+    try:
+        run = EvaluationRun(status=EvalRunStatus.running)
+        db.add(run)
+        await db.flush()
+        await db.refresh(run)
+    except Exception as exc:
+        logger.error(f"event=eval_run_create_failed err={exc!r}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to create evaluation run: {type(exc).__name__}: {exc}")
     run_id = run.id
     background_tasks.add_task(_run_evaluation, run_id, request)
     logger.info(f"event=eval_run_triggered run_id={run_id}")
+    return EvaluationRunRead.model_validate(run)
+
+
+@router.get("/runs/{run_id}", response_model=EvaluationRunRead)
+async def get_run(
+    run_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> EvaluationRunRead:
+    """Get the status of an evaluation run (status, summary, or error detail)."""
+    result = await db.execute(
+        select(EvaluationRun).where(EvaluationRun.id == run_id)
+    )
+    run = result.scalar_one_or_none()
+    if run is None:
+        raise HTTPException(status_code=404, detail="Evaluation run not found")
     return EvaluationRunRead.model_validate(run)
 
 
