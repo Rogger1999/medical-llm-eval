@@ -19,7 +19,7 @@ from app.evaluators.numeric_checker import NumericChecker
 from app.evaluators.overclaiming_checker import OverclaimingChecker
 from app.evaluators.retrieval_checker import RetrievalChecker
 from app.models.document import Document
-from app.models.evaluation import Evaluation, EvalCategory, EvalRunStatus, EvaluatorType
+from app.models.evaluation import Evaluation, EvalCategory, EvaluationRun, EvalRunStatus, EvaluatorType
 from app.models.task import Task, TaskType
 from app.schemas.evaluation import EvaluationRunRequest
 from app.services.subset_selector import SubsetSelector
@@ -58,12 +58,17 @@ class EvaluationRunner:
             self.session.add(run)
             await self.session.flush()
 
+        # Commit run metadata update before starting long LLM work.
+        await self.session.commit()
+
         all_evals: list[Evaluation] = []
         for doc in subset:
             doc_id = doc.id  # capture before any potential rollback expires the object
             try:
                 evals = await self._evaluate_document(doc, run_id, request.categories)
                 all_evals.extend(evals)
+                # Commit after each document to release the write lock between LLM calls.
+                await self.session.commit()
             except Exception as exc:
                 await self.session.rollback()
                 logger.error(f"event=eval_doc_error doc_id={doc_id} err={exc!r}")
@@ -71,6 +76,11 @@ class EvaluationRunner:
         aggregator = EvalAggregator()
         summary = aggregator.compute_summary(all_evals)
 
+        # Re-fetch run since earlier commits may have closed its identity-map entry.
+        result = await self.session.execute(
+            select(EvaluationRun).where(EvaluationRun.id == run_id)
+        )
+        run = result.scalar_one_or_none()
         if run:
             run.status = EvalRunStatus.completed
             run.summary_json = json.dumps(summary.model_dump())

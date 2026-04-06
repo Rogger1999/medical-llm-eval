@@ -10,7 +10,6 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.orm import DeclarativeBase
-from sqlalchemy.pool import AsyncAdaptedQueuePool
 
 from app.config import get_config
 from app.utils.logging_setup import get_logger
@@ -31,20 +30,11 @@ def _get_engine():
         cfg = get_config()
         db_url = cfg.get("database", "url", default="sqlite+aiosqlite:///./data/rag.db")
         echo = cfg.get("database", "echo", default=False)
-        is_sqlite = db_url.startswith("sqlite")
-        engine_kwargs: dict = dict(
+        _engine = create_async_engine(
+            db_url,
             echo=echo,
             connect_args={"check_same_thread": False, "timeout": 30},
         )
-        if is_sqlite:
-            # Single connection prevents concurrent-write "database is locked".
-            # Async sessions queue at the pool level instead of fighting SQLite.
-            engine_kwargs.update(
-                poolclass=AsyncAdaptedQueuePool,
-                pool_size=1,
-                max_overflow=0,
-            )
-        _engine = create_async_engine(db_url, **engine_kwargs)
     return _engine
 
 
