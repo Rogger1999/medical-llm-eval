@@ -1,3 +1,5 @@
+
+
 # Medical RAG Evaluator
 
 A research prototype that evaluates how well LLMs handle medical literature — specifically open-access papers on malnutrition and undernutrition interventions in children. It fetches papers from Europe PMC, parses and chunks them, runs LLM tasks (summarisation, extraction, QA), and scores the outputs across eight evaluation categories.
