@@ -3,13 +3,14 @@ from __future__ import annotations
 
 from typing import AsyncGenerator
 
-from sqlalchemy import event
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
 from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.pool import AsyncAdaptedQueuePool
 
 from app.config import get_config
 from app.utils.logging_setup import get_logger
@@ -30,18 +31,20 @@ def _get_engine():
         cfg = get_config()
         db_url = cfg.get("database", "url", default="sqlite+aiosqlite:///./data/rag.db")
         echo = cfg.get("database", "echo", default=False)
-        _engine = create_async_engine(
-            db_url,
+        is_sqlite = db_url.startswith("sqlite")
+        engine_kwargs: dict = dict(
             echo=echo,
             connect_args={"check_same_thread": False, "timeout": 30},
         )
-
-        @event.listens_for(_engine.sync_engine, "connect")
-        def _set_wal_mode(dbapi_conn, _record):
-            cursor = dbapi_conn.cursor()
-            cursor.execute("PRAGMA journal_mode=WAL")
-            cursor.execute("PRAGMA synchronous=NORMAL")
-            cursor.close()
+        if is_sqlite:
+            # Single connection prevents concurrent-write "database is locked".
+            # Async sessions queue at the pool level instead of fighting SQLite.
+            engine_kwargs.update(
+                poolclass=AsyncAdaptedQueuePool,
+                pool_size=1,
+                max_overflow=0,
+            )
+        _engine = create_async_engine(db_url, **engine_kwargs)
     return _engine
 
 
@@ -64,6 +67,9 @@ async def init_db() -> None:
     from app.models import document, task, evaluation  # noqa: F401
     engine = _get_engine()
     async with engine.begin() as conn:
+        if str(engine.url).startswith("sqlite"):
+            await conn.execute(text("PRAGMA journal_mode=WAL"))
+            await conn.execute(text("PRAGMA synchronous=NORMAL"))
         await conn.run_sync(Base.metadata.create_all)
     logger.info("event=db_initialized")
 
