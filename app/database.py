@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import AsyncGenerator
 
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -33,8 +33,17 @@ def _get_engine():
         _engine = create_async_engine(
             db_url,
             echo=echo,
-            connect_args={"check_same_thread": False, "timeout": 30},
+            connect_args={"check_same_thread": False},
         )
+
+        @event.listens_for(_engine.sync_engine, "connect")
+        def _set_sqlite_pragmas(dbapi_conn, _connection_record):
+            cursor = dbapi_conn.cursor()
+            # Wait up to 30 s for a write lock instead of failing immediately.
+            # aiosqlite ignores connect_args["timeout"], so we use PRAGMA instead.
+            cursor.execute("PRAGMA busy_timeout = 30000")
+            cursor.close()
+
     return _engine
 
 
