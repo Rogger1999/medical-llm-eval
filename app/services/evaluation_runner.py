@@ -58,16 +58,24 @@ class EvaluationRunner:
             self.session.add(run)
             await self.session.flush()
 
-        # Commit run metadata update before starting long LLM work.
+        # Extract IDs as plain strings before committing — commit expires ORM objects,
+        # and rollback() later in the loop would make re-accessing attributes fail.
+        doc_ids = [doc.id for doc in subset]
         await self.session.commit()
 
         all_evals: list[Evaluation] = []
-        for doc in subset:
-            doc_id = doc.id  # capture before any potential rollback expires the object
+        for doc_id in doc_ids:
             try:
+                # Re-fetch fresh each iteration so prior rollbacks don't leave stale state.
+                doc_result = await self.session.execute(
+                    select(Document).where(Document.id == doc_id)
+                )
+                doc = doc_result.scalar_one_or_none()
+                if doc is None:
+                    logger.warning(f"event=eval_doc_missing doc_id={doc_id}")
+                    continue
                 evals = await self._evaluate_document(doc, run_id, request.categories)
                 all_evals.extend(evals)
-                # Commit after each document to release the write lock between LLM calls.
                 await self.session.commit()
             except Exception as exc:
                 await self.session.rollback()
