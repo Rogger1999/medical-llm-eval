@@ -56,6 +56,7 @@ async def run_evaluation(
         logger.error(f"event=eval_run_create_failed err={exc!r}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to create evaluation run: {type(exc).__name__}: {exc}")
     run_id = run.id
+    await db.commit()  # must be visible to the background task's separate session
     background_tasks.add_task(_run_evaluation, run_id, request)
     logger.info(f"event=eval_run_triggered run_id={run_id}")
     return EvaluationRunRead.model_validate(run)
