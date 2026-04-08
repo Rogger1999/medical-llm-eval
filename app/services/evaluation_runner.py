@@ -6,7 +6,7 @@ import uuid
 from typing import List, Optional
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.config import get_config
 from app.evaluators.abstention_checker import AbstentionChecker
@@ -29,81 +29,109 @@ logger = get_logger(__name__)
 
 
 class EvaluationRunner:
-    def __init__(self, session: AsyncSession) -> None:
-        self.session = session
+    def __init__(self, session_factory: async_sessionmaker) -> None:
+        self.factory = session_factory
         self.cfg = get_config()
 
     async def run(self, run_id: str, request: EvaluationRunRequest) -> None:
-        """Full evaluation pipeline."""
-        from app.models.evaluation import EvaluationRun
+        """Full evaluation pipeline.
 
-        selector = SubsetSelector(self.session)
-        subset = await selector.select_subset(request.subset_size)
+        Sessions are kept short-lived so that SQLite write locks are not held
+        during long LLM API calls.  Pattern per document:
+          1. short session  → fetch doc + task data
+          2. no session     → LLM evaluation calls
+          3. short session  → write Evaluation rows
+        """
+        # --- 1. Initialise run: fetch subset and update run metadata ----------
+        async with self.factory() as session:
+            selector = SubsetSelector(session)
+            subset = await selector.select_subset(request.subset_size)
 
-        result = await self.session.execute(
-            select(EvaluationRun).where(EvaluationRun.id == run_id)
-        )
-        run = result.scalar_one_or_none()
-        if run:
-            from sqlalchemy import select as _select
-            from app.models.document import DocumentStatus
-            total_result = await self.session.execute(
-                _select(Document).where(
-                    Document.status.in_([DocumentStatus.parsed, DocumentStatus.chunked])
-                )
+            result = await session.execute(
+                select(EvaluationRun).where(EvaluationRun.id == run_id)
             )
-            total_docs = len(total_result.scalars().all())
-            run.subset_size = len(subset)
-            run.total_docs = total_docs
-            self.session.add(run)
-            await self.session.flush()
+            run = result.scalar_one_or_none()
+            if run:
+                from app.models.document import DocumentStatus
+                total_result = await session.execute(
+                    select(Document).where(
+                        Document.status.in_([DocumentStatus.parsed, DocumentStatus.chunked])
+                    )
+                )
+                total_docs = len(total_result.scalars().all())
+                run.subset_size = len(subset)
+                run.total_docs = total_docs
+                session.add(run)
 
-        # Extract IDs as plain strings before committing — commit expires ORM objects,
-        # and rollback() later in the loop would make re-accessing attributes fail.
-        doc_ids = [doc.id for doc in subset]
-        await self.session.commit()
+            # Snapshot IDs before commit expires the ORM objects.
+            doc_ids = [doc.id for doc in subset]
+            await session.commit()
+        # Session closed → DB lock released.
 
         all_evals: list[Evaluation] = []
         for doc_id in doc_ids:
             try:
-                # Re-fetch fresh each iteration so prior rollbacks don't leave stale state.
-                doc_result = await self.session.execute(
-                    select(Document).where(Document.id == doc_id)
-                )
-                doc = doc_result.scalar_one_or_none()
-                if doc is None:
-                    logger.warning(f"event=eval_doc_missing doc_id={doc_id}")
-                    continue
-                evals = await self._evaluate_document(doc, run_id, request.categories)
+                evals = await self._evaluate_document(doc_id, run_id, request.categories)
                 all_evals.extend(evals)
-                await self.session.commit()
             except Exception as exc:
-                await self.session.rollback()
                 logger.error(f"event=eval_doc_error doc_id={doc_id} err={exc!r}")
 
+        # --- 3. Finalise run --------------------------------------------------
         aggregator = EvalAggregator()
         summary = aggregator.compute_summary(all_evals)
 
-        # Re-fetch run since earlier commits may have closed its identity-map entry.
-        result = await self.session.execute(
-            select(EvaluationRun).where(EvaluationRun.id == run_id)
-        )
-        run = result.scalar_one_or_none()
-        if run:
-            run.status = EvalRunStatus.completed
-            run.summary_json = json.dumps(summary.model_dump())
-            self.session.add(run)
+        async with self.factory() as session:
+            result = await session.execute(
+                select(EvaluationRun).where(EvaluationRun.id == run_id)
+            )
+            run = result.scalar_one_or_none()
+            if run:
+                run.status = EvalRunStatus.completed
+                run.summary_json = json.dumps(summary.model_dump())
+                session.add(run)
+            await session.commit()
 
-        await self.session.commit()
         logger.info(f"event=eval_run_complete run_id={run_id} docs={len(subset)}")
 
     async def _evaluate_document(
         self,
-        doc: Document,
+        doc_id: str,
         run_id: str,
         categories: Optional[list[str]],
     ) -> List[Evaluation]:
-        """Run all evaluators on a single document."""
+        """Evaluate one document.
+
+        DB access is split into two short windows:
+          - fetch window: read doc + task (session closed before LLM calls)
+          - write window: persist Evaluation rows (session closed immediately after)
+        """
+        # --- fetch window -----------------------------------------------------
+        async with self.factory() as session:
+            doc_result = await session.execute(
+                select(Document).where(Document.id == doc_id)
+            )
+            doc = doc_result.scalar_one_or_none()
+            if doc is None:
+                logger.warning(f"event=eval_doc_missing doc_id={doc_id}")
+                return []
+
+            task_result = await session.execute(
+                select(Task)
+                .where(Task.document_id == doc_id)
+                .where(Task.task_type == TaskType.summarize)
+                .order_by(Task.created_at.desc())
+            )
+            task = task_result.scalars().first()
+
+            # Snapshot plain values — session will expire after commit.
+            output = task.primary_output or "" if task else ""
+            task_id = task.id if task else None
+            # Detach objects from the session so we can pass them to checkers
+            # that read plain attributes after the session closes.
+            session.expunge_all()
+        # Session closed → DB lock released before any LLM calls.
+
+        # --- LLM evaluation (no DB session held) ------------------------------
         ingest_checker = IngestChecker()
         retrieval_checker = RetrievalChecker()
         grounding_checker = GroundingChecker()
@@ -113,8 +141,6 @@ class EvaluationRunner:
         adversarial_checker = AdversarialChecker()
         overclaiming_checker = OverclaimingChecker()
 
-        task = await self._get_or_create_task(doc)
-        output = task.primary_output or "" if task else ""
         results_map = {
             EvalCategory.ingest: ingest_checker.check(doc),
             EvalCategory.retrieval: retrieval_checker.check(doc, task),
@@ -126,32 +152,27 @@ class EvaluationRunner:
             EvalCategory.overclaiming: await overclaiming_checker.check(doc, output),
         }
 
+        # --- write window -----------------------------------------------------
         evals: List[Evaluation] = []
-        for category, check_result in results_map.items():
-            if categories and category.value not in categories:
-                continue
-            ev = Evaluation(
-                id=str(uuid.uuid4()),
-                document_id=doc.id,
-                task_id=task.id if task else None,
-                run_id=run_id,
-                eval_category=category,
-                pass_fail=check_result.pass_fail,
-                score=check_result.score,
-                details=json.dumps(check_result.details),
-                evaluator_type=EvaluatorType(check_result.evaluator_type),
-            )
-            self.session.add(ev)
-            evals.append(ev)
+        async with self.factory() as session:
+            for category, check_result in results_map.items():
+                if categories and category.value not in categories:
+                    continue
+                ev = Evaluation(
+                    id=str(uuid.uuid4()),
+                    document_id=doc_id,
+                    task_id=task_id,
+                    run_id=run_id,
+                    eval_category=category,
+                    pass_fail=check_result.pass_fail,
+                    score=check_result.score,
+                    details=json.dumps(check_result.details),
+                    evaluator_type=EvaluatorType(check_result.evaluator_type),
+                )
+                session.add(ev)
+                evals.append(ev)
+            await session.flush()
+            await session.commit()
+        # Session closed → DB lock released.
 
-        await self.session.flush()
         return evals
-
-    async def _get_or_create_task(self, doc: Document) -> Optional[Task]:
-        result = await self.session.execute(
-            select(Task)
-            .where(Task.document_id == doc.id)
-            .where(Task.task_type == TaskType.summarize)
-            .order_by(Task.created_at.desc())
-        )
-        return result.scalars().first()

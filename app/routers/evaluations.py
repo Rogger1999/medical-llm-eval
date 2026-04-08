@@ -20,14 +20,13 @@ async def _run_evaluation(run_id: str, request: EvaluationRunRequest) -> None:
     from app.models.evaluation import EvaluationRun, EvalRunStatus
     from app.services.evaluation_runner import EvaluationRunner
     factory = _get_session_factory()
-    async with factory() as session:
-        runner = EvaluationRunner(session)
+    runner = EvaluationRunner(factory)
+    try:
+        await runner.run(run_id, request)
+    except Exception as exc:
+        logger.error(f"event=eval_run_error run_id={run_id} err={exc!r}", exc_info=True)
         try:
-            await runner.run(run_id, request)
-        except Exception as exc:
-            logger.error(f"event=eval_run_error run_id={run_id} err={exc!r}", exc_info=True)
-            try:
-                await session.rollback()  # must reset before any further use of this session
+            async with factory() as session:
                 result = await session.execute(
                     select(EvaluationRun).where(EvaluationRun.id == run_id)
                 )
@@ -36,8 +35,8 @@ async def _run_evaluation(run_id: str, request: EvaluationRunRequest) -> None:
                     run.status = EvalRunStatus.failed
                     run.summary_json = json.dumps({"error": type(exc).__name__, "detail": str(exc)})
                     await session.commit()
-            except Exception as inner:
-                logger.error(f"event=eval_run_status_update_failed run_id={run_id} err={inner!r}")
+        except Exception as inner:
+            logger.error(f"event=eval_run_status_update_failed run_id={run_id} err={inner!r}")
 
 
 @router.post("/run", response_model=EvaluationRunRead, status_code=202)
