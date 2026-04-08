@@ -19,12 +19,14 @@ async def _run_evaluation(run_id: str, request: EvaluationRunRequest) -> None:
     from app.database import _get_session_factory
     from app.models.evaluation import EvaluationRun, EvalRunStatus
     from app.services.evaluation_runner import EvaluationRunner
+    logger.info(f"event=eval_bg_task_start run_id={run_id}")
     factory = _get_session_factory()
     runner = EvaluationRunner(factory)
     try:
         await runner.run(run_id, request)
+        logger.info(f"event=eval_bg_task_done run_id={run_id}")
     except Exception as exc:
-        logger.error(f"event=eval_run_error run_id={run_id} err={exc!r}", exc_info=True)
+        logger.error(f"event=eval_bg_task_failed run_id={run_id} err={exc!r}", exc_info=True)
         try:
             async with factory() as session:
                 result = await session.execute(
@@ -35,8 +37,11 @@ async def _run_evaluation(run_id: str, request: EvaluationRunRequest) -> None:
                     run.status = EvalRunStatus.failed
                     run.summary_json = json.dumps({"error": type(exc).__name__, "detail": str(exc)})
                     await session.commit()
+                    logger.info(f"event=eval_run_marked_failed run_id={run_id}")
+                else:
+                    logger.error(f"event=eval_run_mark_failed_not_found run_id={run_id}")
         except Exception as inner:
-            logger.error(f"event=eval_run_status_update_failed run_id={run_id} err={inner!r}")
+            logger.error(f"event=eval_run_status_update_failed run_id={run_id} err={inner!r}", exc_info=True)
 
 
 @router.post("/run", response_model=EvaluationRunRead, status_code=202)

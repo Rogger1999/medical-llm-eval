@@ -6,7 +6,7 @@ import uuid
 from typing import List, Optional
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from app.config import get_config
 from app.evaluators.abstention_checker import AbstentionChecker
@@ -42,16 +42,22 @@ class EvaluationRunner:
           2. no session     → LLM evaluation calls
           3. short session  → write Evaluation rows
         """
+        logger.info(f"event=eval_run_start run_id={run_id} subset_size={request.subset_size} categories={request.categories}")
+
         # --- 1. Initialise run: fetch subset and update run metadata ----------
         async with self.factory() as session:
+            logger.info(f"event=eval_subset_select_start run_id={run_id}")
             selector = SubsetSelector(session)
             subset = await selector.select_subset(request.subset_size)
+            logger.info(f"event=eval_subset_selected run_id={run_id} count={len(subset)}")
 
             result = await session.execute(
                 select(EvaluationRun).where(EvaluationRun.id == run_id)
             )
             run = result.scalar_one_or_none()
-            if run:
+            if run is None:
+                logger.error(f"event=eval_run_not_found run_id={run_id} — row may not have been committed before background task started")
+            else:
                 from app.models.document import DocumentStatus
                 total_result = await session.execute(
                     select(Document).where(
@@ -62,36 +68,43 @@ class EvaluationRunner:
                 run.subset_size = len(subset)
                 run.total_docs = total_docs
                 session.add(run)
+                logger.info(f"event=eval_run_metadata_updated run_id={run_id} subset={len(subset)} total_docs={total_docs}")
 
-            # Snapshot IDs before commit expires the ORM objects.
             doc_ids = [doc.id for doc in subset]
             await session.commit()
-        # Session closed → DB lock released.
+            logger.info(f"event=eval_init_committed run_id={run_id}")
 
         all_evals: list[Evaluation] = []
-        for doc_id in doc_ids:
+        for i, doc_id in enumerate(doc_ids):
+            logger.info(f"event=eval_doc_start run_id={run_id} doc_id={doc_id} progress={i+1}/{len(doc_ids)}")
             try:
                 evals = await self._evaluate_document(doc_id, run_id, request.categories)
                 all_evals.extend(evals)
+                logger.info(f"event=eval_doc_done run_id={run_id} doc_id={doc_id} evals_written={len(evals)}")
             except Exception as exc:
-                logger.error(f"event=eval_doc_error doc_id={doc_id} err={exc!r}")
+                logger.error(f"event=eval_doc_error run_id={run_id} doc_id={doc_id} err={exc!r}", exc_info=True)
+
+        logger.info(f"event=eval_all_docs_done run_id={run_id} total_evals={len(all_evals)}")
 
         # --- 3. Finalise run --------------------------------------------------
         aggregator = EvalAggregator()
         summary = aggregator.compute_summary(all_evals)
+        logger.info(f"event=eval_summary_computed run_id={run_id} pass_rate={summary.overall_pass_rate}")
 
         async with self.factory() as session:
             result = await session.execute(
                 select(EvaluationRun).where(EvaluationRun.id == run_id)
             )
             run = result.scalar_one_or_none()
-            if run:
+            if run is None:
+                logger.error(f"event=eval_run_finalise_not_found run_id={run_id}")
+            else:
                 run.status = EvalRunStatus.completed
                 run.summary_json = json.dumps(summary.model_dump())
                 session.add(run)
             await session.commit()
 
-        logger.info(f"event=eval_run_complete run_id={run_id} docs={len(subset)}")
+        logger.info(f"event=eval_run_complete run_id={run_id} docs={len(doc_ids)} evals={len(all_evals)}")
 
     async def _evaluate_document(
         self,
@@ -112,7 +125,7 @@ class EvaluationRunner:
             )
             doc = doc_result.scalar_one_or_none()
             if doc is None:
-                logger.warning(f"event=eval_doc_missing doc_id={doc_id}")
+                logger.warning(f"event=eval_doc_missing run_id={run_id} doc_id={doc_id}")
                 return []
 
             task_result = await session.execute(
@@ -122,14 +135,12 @@ class EvaluationRunner:
                 .order_by(Task.created_at.desc())
             )
             task = task_result.scalars().first()
-
-            # Snapshot plain values — session will expire after commit.
+            has_task = task is not None
             output = task.primary_output or "" if task else ""
             task_id = task.id if task else None
-            # Detach objects from the session so we can pass them to checkers
-            # that read plain attributes after the session closes.
             session.expunge_all()
-        # Session closed → DB lock released before any LLM calls.
+
+        logger.info(f"event=eval_doc_fetched run_id={run_id} doc_id={doc_id} has_task={has_task} output_len={len(output)}")
 
         # --- LLM evaluation (no DB session held) ------------------------------
         ingest_checker = IngestChecker()
@@ -141,16 +152,22 @@ class EvaluationRunner:
         adversarial_checker = AdversarialChecker()
         overclaiming_checker = OverclaimingChecker()
 
-        results_map = {
-            EvalCategory.ingest: ingest_checker.check(doc),
-            EvalCategory.retrieval: retrieval_checker.check(doc, task),
-            EvalCategory.grounding: await grounding_checker.check(doc, task),
-            EvalCategory.hallucination: await hallucination_checker.check(doc, output),
-            EvalCategory.numeric: numeric_checker.check(doc, output),
-            EvalCategory.abstention: abstention_checker.check(doc, output),
-            EvalCategory.adversarial: adversarial_checker.check(doc, output),
-            EvalCategory.overclaiming: await overclaiming_checker.check(doc, output),
-        }
+        logger.info(f"event=eval_checkers_start run_id={run_id} doc_id={doc_id}")
+        try:
+            results_map = {
+                EvalCategory.ingest: ingest_checker.check(doc),
+                EvalCategory.retrieval: retrieval_checker.check(doc, task),
+                EvalCategory.grounding: await grounding_checker.check(doc, task),
+                EvalCategory.hallucination: await hallucination_checker.check(doc, output),
+                EvalCategory.numeric: numeric_checker.check(doc, output),
+                EvalCategory.abstention: abstention_checker.check(doc, output),
+                EvalCategory.adversarial: adversarial_checker.check(doc, output),
+                EvalCategory.overclaiming: await overclaiming_checker.check(doc, output),
+            }
+        except Exception as exc:
+            logger.error(f"event=eval_checkers_error run_id={run_id} doc_id={doc_id} err={exc!r}", exc_info=True)
+            raise
+        logger.info(f"event=eval_checkers_done run_id={run_id} doc_id={doc_id} categories={list(results_map.keys())}")
 
         # --- write window -----------------------------------------------------
         evals: List[Evaluation] = []
@@ -173,6 +190,6 @@ class EvaluationRunner:
                 evals.append(ev)
             await session.flush()
             await session.commit()
-        # Session closed → DB lock released.
 
+        logger.info(f"event=eval_doc_written run_id={run_id} doc_id={doc_id} rows={len(evals)}")
         return evals
